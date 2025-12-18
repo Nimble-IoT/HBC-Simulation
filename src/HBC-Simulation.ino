@@ -87,6 +87,12 @@ void loop() {
   if ((now - lastUpdate) >= UPDATE_INTERVAL) {
     lastUpdate = now;
     
+    // Generate random temperature values between 150 and 175 for each TC
+    for (int i = 0; i < 8; i++) {
+      // Generate random value between 150.00 and 175.00
+      simulatedTCValues[i] = 150.0 + (random(0, 2501) / 100.0);
+    }
+    
     // Create JSON document for all 8 TCs
     DynamicJsonDocument tcDataDoc(1024);
     tcDataDoc["h"] = "tcSim"; // Header: thermocouple simulator
@@ -108,10 +114,10 @@ void loop() {
     
     // Optional: Also print to Serial for debugging
     // Serial.println("Sent: " + tcDataString);
-    // Serial.print("Power: Ch0="); Serial.print(channelPowerPercent[0]);
-    // Serial.print("%, Ch1="); Serial.print(channelPowerPercent[1]);
-    // Serial.print("%, Ch2="); Serial.print(channelPowerPercent[2]);
-    // Serial.print("%, Ch3="); Serial.println(channelPowerPercent[3]);
+     Serial.print("Power: Ch0="); Serial.print(channelPowerPercent[0]);
+     Serial.print("%, Ch1="); Serial.print(channelPowerPercent[1]);
+     Serial.print("%, Ch2="); Serial.print(channelPowerPercent[2]);
+     Serial.print("%, Ch3="); Serial.println(channelPowerPercent[3]);
   }
   
   Particle.process();

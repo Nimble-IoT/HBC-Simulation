@@ -3,5 +3,8 @@
     "C_Cpp.default.configurationProvider": "particle.particle-vscode-core",
     "files.associations": {
         "*.ino": "cpp"
-    }
+    },
+    "particle.firmwareVersion": "6.2.1",
+    "particle.targetPlatform": "boron",
+    "particle.targetDevice": "e00fce6826f5e6b91e150448"
 }
