@@ -17,16 +17,8 @@ SYSTEM_THREAD(ENABLED);
 // Update interval (1 second = 1000ms)
 #define UPDATE_INTERVAL 1000
 
-// GPO Board Power Reading Configuration
-// Pins D2, D3, D4, D5 read PWM signals from GPO board (channels 0-3)
-#define GPO_PIN_0 D2  // Channel 0 power signal
-#define GPO_PIN_1 D3  // Channel 1 power signal
-#define GPO_PIN_2 D4  // Channel 2 power signal
-#define GPO_PIN_3 D5  // Channel 3 power signal
-#define PWM_FREQUENCY 10      // 10Hz PWM from main firmware
-#define PWM_PERIOD_MS 100      // 100ms period (1/10Hz)
-#define PWM_RESOLUTION 4095   // 12-bit resolution (0-4095)
-#define PWM_MEASUREMENT_TIME_MS 200  // Measure over 2 periods for accuracy
+// Power data received from COTS firmware over Serial1
+// Power percentages are sent every 250ms from COTS firmware
 
 // Simulated TC values (steady values for testing)
 // These can be modified to test different scenarios
@@ -41,13 +33,12 @@ double simulatedTCValues[8] = {
   110.0  // TC 7
 };
 
-// Power percentage values from GPO board (channels 0-3)
-// Stored for future use to potentially modify TC values based on power
+// Power percentage values received from COTS firmware (channels 0-3)
+// Updated when power messages are received over Serial1
 double channelPowerPercent[4] = {0.0, 0.0, 0.0, 0.0};
 
 unsigned long lastUpdate = 0;
-unsigned long lastPowerRead = 0;
-#define POWER_READ_INTERVAL 100  // Read power every 100ms
+String serial1Buffer = ""; // Buffer for accumulating Serial1 data
 
 void setup() {
   // Initialize Serial1 for communication with main Particle device
@@ -61,27 +52,18 @@ void setup() {
   //   Particle.process();
   // }
   
-  // Initialize GPO power reading pins as inputs
-  pinMode(GPO_PIN_0, INPUT);
-  pinMode(GPO_PIN_1, INPUT);
-  pinMode(GPO_PIN_2, INPUT);
-  pinMode(GPO_PIN_3, INPUT);
-  
   delay(1000); // Give Serial1 time to initialize
   
   Serial.println("TC Simulator Started");
   Serial.println("Sending TC data for indices 0-7");
-  Serial.println("Reading power from GPO board on D2-D5 (channels 0-3)");
+  Serial.println("Receiving power data from COTS firmware over Serial1");
 }
 
 void loop() {
   unsigned long now = millis();
   
-  // Read power percentages from GPO board (channels 0-3)
-  if ((now - lastPowerRead) >= POWER_READ_INTERVAL) {
-    lastPowerRead = now;
-    readGpoPowerLevels();
-  }
+  // Process incoming power data from COTS firmware over Serial1
+  processPowerData();
   
   // Update every second
   if ((now - lastUpdate) >= UPDATE_INTERVAL) {
@@ -128,37 +110,49 @@ double round2(double value) {
   return (int)(value * 100 + 0.5) / 100.0;
 }
 
-// Read PWM duty cycle from GPO board and convert to power percentage
-// PWM is 10Hz (100ms period) with 12-bit resolution (0-4095)
-// Formula: power% = (dutyCycle / 4095.0) * 100.0
-void readGpoPowerLevels() {
-  int gpoPins[4] = {GPO_PIN_0, GPO_PIN_1, GPO_PIN_2, GPO_PIN_3};
-  
-  for (int ch = 0; ch < 4; ch++) {
-    unsigned long highTime = 0;
-    unsigned long measurementStart = millis();
-    int highCount = 0;
-    int totalSamples = 0;
-    
-    // Measure over multiple PWM periods for accuracy
-    while ((millis() - measurementStart) < PWM_MEASUREMENT_TIME_MS) {
-      if (digitalRead(gpoPins[ch]) == HIGH) {
-        highCount++;
+// Process power data received from COTS firmware over Serial1
+// Message format: {"h":"power", "p":[ch0, ch1, ch2, ch3]}
+// Power data is sent every 250ms from COTS firmware
+// Power values match channel status "p" field (bitToPercent(GetOutputValue()))
+void processPowerData() {
+  // Check Serial1 for incoming data
+  while (Serial1.available()) {
+    char c = Serial1.read();
+    if (c == '\n' || c == '\r') {
+      if (serial1Buffer.length() > 0) {
+        // Try to parse JSON
+        DynamicJsonDocument doc(512);
+        DeserializationError error = deserializeJson(doc, serial1Buffer);
+        
+        if (!error && doc["h"] == "power") {
+          // Valid power data message - matches channel status "p" field format
+          if (doc.containsKey("p") && doc["p"].is<JsonArray>()) {
+            JsonArray powerArray = doc["p"];
+            int arraySize = powerArray.size();
+            
+            // Update power percentages for channels 0-3
+            for (int i = 0; i < 4 && i < arraySize; i++) {
+              if (powerArray[i].is<double>()) {
+                channelPowerPercent[i] = powerArray[i].as<double>();
+                
+                // Clamp to 0-100%
+                if (channelPowerPercent[i] < 0.0) channelPowerPercent[i] = 0.0;
+                if (channelPowerPercent[i] > 100.0) channelPowerPercent[i] = 100.0;
+              }
+            }
+          }
+        }
+        
+        serial1Buffer = ""; // Clear buffer
       }
-      totalSamples++;
-      delayMicroseconds(100); // Sample every 100us for good resolution
+    } else {
+      serial1Buffer += c;
+      
+      // Prevent buffer overflow
+      if (serial1Buffer.length() > 512) {
+        serial1Buffer = "";
+      }
     }
-    
-    // Calculate duty cycle: (high samples / total samples) * resolution
-    double dutyRatio = (double)highCount / (double)totalSamples;
-    double dutyCycle = dutyRatio * PWM_RESOLUTION;
-    
-    // Convert to power percentage: (dutyCycle / 4095.0) * 100.0
-    channelPowerPercent[ch] = (dutyCycle / 4095.0) * 100.0;
-    
-    // Clamp to 0-100%
-    if (channelPowerPercent[ch] < 0.0) channelPowerPercent[ch] = 0.0;
-    if (channelPowerPercent[ch] > 100.0) channelPowerPercent[ch] = 100.0;
   }
 }
 
