@@ -20,22 +20,28 @@ SYSTEM_THREAD(ENABLED);
 // Power data received from COTS firmware over Serial1
 // Power percentages are sent every 250ms from COTS firmware
 
-// Simulated TC values (steady values for testing)
-// These can be modified to test different scenarios
+// Initial simulated TC values
+// Set them all to 70.00 Deg F
 double simulatedTCValues[8] = {
-  75.0,  // TC 0
-  80.0,  // TC 1
-  85.0,  // TC 2
-  90.0,  // TC 3
-  95.0,  // TC 4
-  100.0, // TC 5
-  105.0, // TC 6
-  110.0  // TC 7
+  70.0,  // TC 0
+  70.0,  // TC 1
+  70.0,  // TC 2
+  70.0,  // TC 3
+  70.0,  // TC 4
+  70.0,  // TC 5
+  70.0,  // TC 6
+  70.0   // TC 7
 };
 
 // Power percentage values received from COTS firmware (channels 0-3)
 // Updated when power messages are received over Serial1
 double channelPowerPercent[4] = {0.0, 0.0, 0.0, 0.0};
+
+// Thermal simulation constants
+#define HEAT_CAP 1000.0        // Heat capacity (W*sec/°C)
+#define HEAT_TRANSFER_HA 50.0  // Heat transfer coefficient (W/°C)
+#define AMBIENT_TEMP 70.0      // Ambient temperature (°F)
+#define MAX_POWER 1000.0       // Maximum power (W) - used to convert percentage to actual power
 
 unsigned long lastUpdate = 0;
 String serial1Buffer = ""; // Buffer for accumulating Serial1 data
@@ -69,10 +75,25 @@ void loop() {
   if ((now - lastUpdate) >= UPDATE_INTERVAL) {
     lastUpdate = now;
     
-    // Generate random temperature values between 150 and 175 for each TC
+    // Simulate temperature values based on channel power percentages
+    // TC 0,1 -> channel 0; TC 2,3 -> channel 1; TC 4,5 -> channel 2; TC 6,7 -> channel 3
     for (int i = 0; i < 8; i++) {
-      // Generate random value between 150.00 and 175.00
-      simulatedTCValues[i] = 150.0 + (random(0, 2501) / 100.0);
+      int channelIndex = i / 2;  // Map TC index to channel index (0-3)
+      double powerPercent = channelPowerPercent[channelIndex];
+      
+      // Convert power percentage to actual power (W)
+      double Powerin = (powerPercent / 100.0) * MAX_POWER;
+      
+      // Get current temperature
+      double Temp = simulatedTCValues[i];
+      
+      // Calculate temperature derivatives
+      double Tdotin = Powerin / HEAT_CAP;                              // W / (W*sec/°C) = °C/sec
+      double Tdotout = (Temp - AMBIENT_TEMP) * HEAT_TRANSFER_HA / HEAT_CAP;  // W / (W*sec/°C) = °C/sec
+      double Tdot = Tdotin - Tdotout;                                  // °C/sec
+      
+      // Update temperature
+      simulatedTCValues[i] = Temp + Tdot * UPDATE_INTERVAL / 1000.0;   // °F
     }
     
     // Create JSON document for all 8 TCs
