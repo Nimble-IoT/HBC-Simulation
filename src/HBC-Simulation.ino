@@ -34,7 +34,7 @@ double channelPowerPercent[NUM_CHANNELS];
 #define HEAT_CAP 1000.0        // Heat capacity (W*sec/°C)
 #define HEAT_TRANSFER_HA 50.0  // Heat transfer coefficient (W/°C)
 #define AMBIENT_TEMP 70.0      // Ambient temperature (°F)
-#define MAX_POWER 1000.0       // Maximum power (W) - used to convert percentage to actual power
+#define MAX_POWER 10000.0       // Maximum power (W) - used to convert percentage to actual power
 
 unsigned long lastUpdate = 0;
 String serial1Buffer = ""; // Buffer for accumulating Serial1 data
@@ -82,14 +82,19 @@ void loop() {
     lastUpdate = now;
     
     // Simulate temperature values based on channel power percentages
-    // For now, map TCs to channels: TC 0,1 -> channel 0; TC 2,3 -> channel 1; etc.
-    // This mapping can be made configurable later
+    // Each channel has exactly 3 TCs: 
+    // Channel 0: TCs 0-2, Channel 1: TCs 3-5, ..., Channel 15: TCs 45-47
+    // TCs 48-49 are not used (only 48 TCs used out of 50)
     for (int i = 0; i < NUM_TCS; i++) {
-      int channelIndex = i / 2;  // Map TC index to channel index (0-15 for 50 TCs)
+      int channelIndex = i / 3;  // 3 TCs per channel
+      
+      // Only simulate TCs 0-47 (48 TCs total, leaving out TCs 48-49)
       if (channelIndex >= NUM_CHANNELS) {
-        channelIndex = NUM_CHANNELS - 1;  // Clamp to last channel if needed
+        // TCs 48-49: don't apply power, just maintain ambient temperature
+        channelIndex = -1;  // Mark as unused
       }
-      double powerPercent = channelPowerPercent[channelIndex];
+      
+      double powerPercent = (channelIndex >= 0) ? channelPowerPercent[channelIndex] : 0.0;
       
       // Convert power percentage to actual power (W)
       double Powerin = (powerPercent / 100.0) * MAX_POWER;
@@ -129,21 +134,51 @@ void loop() {
       Serial.println("ERROR: TC data JSON document overflowed! Increase size.");
     }
     
-    Serial1.println(tcDataString);
+    // TODO: REMOVE DEBUG - Log sending info periodically
+    static unsigned long lastSendDebug = 0;
+    static int sendCount = 0;
+    if ((now - lastSendDebug) >= 10000) {  // Every 10 seconds
+      lastSendDebug = now;
+      Serial.print("[Sim] Sent TC data #");
+      Serial.print(++sendCount);
+      Serial.print(", length: ");
+      Serial.print(tcDataString.length());
+      Serial.print(" bytes, TCs: ");
+      Serial.print(NUM_TCS);
+      Serial.print(", time: ");
+      Serial.println(now);
+      
+      // Show first 200 chars
+      int showLen = min(200, (int)tcDataString.length());
+      Serial.print("[Sim] Message preview (first ");
+      Serial.print(showLen);
+      Serial.print(" chars): ");
+      Serial.println(tcDataString.substring(0, showLen));
+    }
+    
+    // Send with explicit newline
+    Serial1.print(tcDataString);
+    Serial1.print('\n');  // Explicit newline to ensure message delimiter
     
     // Optional: Also print to Serial for debugging
     // Serial.println("Sent: " + tcDataString);
-    // Print first few channels for debugging
-    Serial.print("Power: ");
-    for (int i = 0; i < 4 && i < NUM_CHANNELS; i++) {
-      Serial.print("Ch");
-      Serial.print(i);
-      Serial.print("=");
-      Serial.print(channelPowerPercent[i]);
-      Serial.print("%");
-      if (i < 3 && i < NUM_CHANNELS - 1) Serial.print(", ");
+    // TODO: REMOVE DEBUG - Print all channels for debugging (every 10 seconds to reduce spam)
+    static unsigned long lastPowerPrint = 0;
+    if ((now - lastPowerPrint) >= 10000) {
+      lastPowerPrint = now;
+      Serial.print("Power (all ");
+      Serial.print(NUM_CHANNELS);
+      Serial.print(" channels): ");
+      for (int i = 0; i < NUM_CHANNELS; i++) {
+        Serial.print("Ch");
+        Serial.print(i);
+        Serial.print("=");
+        Serial.print(channelPowerPercent[i]);
+        Serial.print("%");
+        if (i < NUM_CHANNELS - 1) Serial.print(", ");
+      }
+      Serial.println();
     }
-    Serial.println();
   }
   
   Particle.process();
@@ -175,6 +210,7 @@ void processPowerData() {
             int arraySize = powerArray.size();
             
             // Update power percentages for all channels (0-15)
+            int channelsUpdated = 0;
             for (int i = 0; i < NUM_CHANNELS && i < arraySize; i++) {
               if (powerArray[i].is<double>()) {
                 channelPowerPercent[i] = powerArray[i].as<double>();
@@ -182,9 +218,28 @@ void processPowerData() {
                 // Clamp to 0-100%
                 if (channelPowerPercent[i] < 0.0) channelPowerPercent[i] = 0.0;
                 if (channelPowerPercent[i] > 100.0) channelPowerPercent[i] = 100.0;
+                channelsUpdated++;
               }
             }
+            
+            // TODO: REMOVE DEBUG - Log if we didn't receive all expected channels
+            if (arraySize < NUM_CHANNELS) {
+              Serial.print("Warning: Received ");
+              Serial.print(arraySize);
+              Serial.print(" channels, expected ");
+              Serial.println(NUM_CHANNELS);
+            }
+          } else {
+            // TODO: REMOVE DEBUG - Missing power array warning
+            Serial.println("Warning: Power message missing 'p' array");
           }
+        } else if (!error) {
+          // Not a power message, might be other data
+          // Serial.println("Received non-power message");
+        } else {
+          // TODO: REMOVE DEBUG - JSON parse error
+          Serial.print("JSON parse error: ");
+          Serial.println(error.c_str());
         }
         
         serial1Buffer = ""; // Clear buffer
@@ -199,4 +254,5 @@ void processPowerData() {
     }
   }
 }
+
 
