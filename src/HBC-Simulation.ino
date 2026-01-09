@@ -1,6 +1,6 @@
 /*
  * TC Simulator Firmware
- * Description: Simulates 8 thermocouples (TCs 0-7) and sends data over Serial1
+ * Description: Simulates 50 thermocouples (TCs 0-49) and sends data over Serial1
  * Author: Auto-generated for HBC-COTS-Firmware test bench
  * Date: 2024
  */
@@ -22,20 +22,13 @@ SYSTEM_THREAD(ENABLED);
 
 // Initial simulated TC values
 // Set them all to 70.00 Deg F
-double simulatedTCValues[8] = {
-  70.0,  // TC 0
-  70.0,  // TC 1
-  70.0,  // TC 2
-  70.0,  // TC 3
-  70.0,  // TC 4
-  70.0,  // TC 5
-  70.0,  // TC 6
-  70.0   // TC 7
-};
+#define NUM_TCS 50
+double simulatedTCValues[NUM_TCS];
 
-// Power percentage values received from COTS firmware (channels 0-3)
+// Power percentage values received from COTS firmware (channels 0-15)
 // Updated when power messages are received over Serial1
-double channelPowerPercent[4] = {0.0, 0.0, 0.0, 0.0};
+#define NUM_CHANNELS 16
+double channelPowerPercent[NUM_CHANNELS];
 
 // Thermal simulation constants
 #define HEAT_CAP 1000.0        // Heat capacity (W*sec/°C)
@@ -58,11 +51,24 @@ void setup() {
   //   Particle.process();
   // }
   
+  // Initialize all TC values to 70.0°F
+  for (int i = 0; i < NUM_TCS; i++) {
+    simulatedTCValues[i] = 70.0;
+  }
+  
+  // Initialize all channel power percentages to 0.0
+  for (int i = 0; i < NUM_CHANNELS; i++) {
+    channelPowerPercent[i] = 0.0;
+  }
+  
   delay(1000); // Give Serial1 time to initialize
   
   Serial.println("TC Simulator Started");
-  Serial.println("Sending TC data for indices 0-7");
-  Serial.println("Receiving power data from COTS firmware over Serial1");
+  Serial.print("Sending TC data for indices 0-");
+  Serial.println(NUM_TCS - 1);
+  Serial.print("Receiving power data for ");
+  Serial.print(NUM_CHANNELS);
+  Serial.println(" channels from COTS firmware over Serial1");
 }
 
 void loop() {
@@ -76,9 +82,13 @@ void loop() {
     lastUpdate = now;
     
     // Simulate temperature values based on channel power percentages
-    // TC 0,1 -> channel 0; TC 2,3 -> channel 1; TC 4,5 -> channel 2; TC 6,7 -> channel 3
-    for (int i = 0; i < 8; i++) {
-      int channelIndex = i / 2;  // Map TC index to channel index (0-3)
+    // For now, map TCs to channels: TC 0,1 -> channel 0; TC 2,3 -> channel 1; etc.
+    // This mapping can be made configurable later
+    for (int i = 0; i < NUM_TCS; i++) {
+      int channelIndex = i / 2;  // Map TC index to channel index (0-15 for 50 TCs)
+      if (channelIndex >= NUM_CHANNELS) {
+        channelIndex = NUM_CHANNELS - 1;  // Clamp to last channel if needed
+      }
       double powerPercent = channelPowerPercent[channelIndex];
       
       // Convert power percentage to actual power (W)
@@ -96,14 +106,14 @@ void loop() {
       simulatedTCValues[i] = Temp + Tdot * UPDATE_INTERVAL / 1000.0;   // °F
     }
     
-    // Create JSON document for all 8 TCs
-    DynamicJsonDocument tcDataDoc(1024);
+    // Create JSON document for all 50 TCs
+    DynamicJsonDocument tcDataDoc(6144);  // Increased size for 50 TCs (50 * ~100 bytes + overhead)
     tcDataDoc["h"] = "tcSim"; // Header: thermocouple simulator
     
     // Create array of TC data
     JsonArray tcArray = tcDataDoc.createNestedArray("tcs");
     
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < NUM_TCS; i++) {
       JsonObject tcObj = tcArray.createNestedObject();
       tcObj["i"] = i;                    // Index
       tcObj["t"] = round2(simulatedTCValues[i]); // Temperature
@@ -113,14 +123,27 @@ void loop() {
     // Serialize and send over Serial1
     String tcDataString;
     serializeJson(tcDataDoc, tcDataString);
+    
+    // Check if serialization was successful (document not too small)
+    if (tcDataDoc.overflowed()) {
+      Serial.println("ERROR: TC data JSON document overflowed! Increase size.");
+    }
+    
     Serial1.println(tcDataString);
     
     // Optional: Also print to Serial for debugging
     // Serial.println("Sent: " + tcDataString);
-     Serial.print("Power: Ch0="); Serial.print(channelPowerPercent[0]);
-     Serial.print("%, Ch1="); Serial.print(channelPowerPercent[1]);
-     Serial.print("%, Ch2="); Serial.print(channelPowerPercent[2]);
-     Serial.print("%, Ch3="); Serial.println(channelPowerPercent[3]);
+    // Print first few channels for debugging
+    Serial.print("Power: ");
+    for (int i = 0; i < 4 && i < NUM_CHANNELS; i++) {
+      Serial.print("Ch");
+      Serial.print(i);
+      Serial.print("=");
+      Serial.print(channelPowerPercent[i]);
+      Serial.print("%");
+      if (i < 3 && i < NUM_CHANNELS - 1) Serial.print(", ");
+    }
+    Serial.println();
   }
   
   Particle.process();
@@ -132,7 +155,7 @@ double round2(double value) {
 }
 
 // Process power data received from COTS firmware over Serial1
-// Message format: {"h":"power", "p":[ch0, ch1, ch2, ch3]}
+// Message format: {"h":"power", "p":[ch0, ch1, ..., ch15]}
 // Power data is sent every 250ms from COTS firmware
 // Power values match channel status "p" field (bitToPercent(GetOutputValue()))
 void processPowerData() {
@@ -142,7 +165,7 @@ void processPowerData() {
     if (c == '\n' || c == '\r') {
       if (serial1Buffer.length() > 0) {
         // Try to parse JSON
-        DynamicJsonDocument doc(512);
+        DynamicJsonDocument doc(1024);  // Increased size for 16 channels
         DeserializationError error = deserializeJson(doc, serial1Buffer);
         
         if (!error && doc["h"] == "power") {
@@ -151,8 +174,8 @@ void processPowerData() {
             JsonArray powerArray = doc["p"];
             int arraySize = powerArray.size();
             
-            // Update power percentages for channels 0-3
-            for (int i = 0; i < 4 && i < arraySize; i++) {
+            // Update power percentages for all channels (0-15)
+            for (int i = 0; i < NUM_CHANNELS && i < arraySize; i++) {
               if (powerArray[i].is<double>()) {
                 channelPowerPercent[i] = powerArray[i].as<double>();
                 
@@ -170,7 +193,7 @@ void processPowerData() {
       serial1Buffer += c;
       
       // Prevent buffer overflow
-      if (serial1Buffer.length() > 512) {
+      if (serial1Buffer.length() > 1024) {  // Increased buffer size
         serial1Buffer = "";
       }
     }
