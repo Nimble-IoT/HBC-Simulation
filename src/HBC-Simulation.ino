@@ -10,15 +10,25 @@ SYSTEM_THREAD(ENABLED);
 // Define connection options
 #define ARDUINOJSON_ENABLE_ARDUINO_STRING 1
 #include <ArduinoJson.h>
+#include <string.h>
+#include "Serial1CommsManager.h"
+
+// TC Data Structure - holds all values for a single thermocouple
+struct TCData {
+  int index;           // TC index (0-49)
+  double temperature;  // TC reading in degrees
+  int faultCode;       // TC error/fault code (0 = no error)
+};
+
+// Serial1CommsManager instance
+Serial1CommsManager serial1CommsManager(Serial1);
 
 // Serial1 configuration (RX/TX pins on Particle Argon)
 #define SERIAL1_BAUD 115200
 
-// Update interval (1 second = 1000ms)
-#define UPDATE_INTERVAL 1000
-
-// Power data received from COTS firmware over Serial1
-// Power percentages are sent every 250ms from COTS firmware
+// Update intervals
+#define UPDATE_INTERVAL 1000  // Thermal simulation update (1 second)
+#define TC_SEND_INTERVAL_MS 1000  // Send TC data every 1 second
 
 // Initial simulated TC values
 // Set them all to 70.00 Deg F
@@ -37,7 +47,11 @@ double channelPowerPercent[NUM_CHANNELS];
 #define MAX_POWER 10000.0       // Maximum power (W) - used to convert percentage to actual power
 
 unsigned long lastUpdate = 0;
-String serial1Buffer = ""; // Buffer for accumulating Serial1 data
+unsigned long lastTcSend = 0;
+int tcFaultCodes[NUM_TCS];  // TC fault codes array
+
+// Forward declaration
+String FormatTCDataForSend(double tcValues[], int tcFaultCodes[], int numTCs, int valuesPerTC = 3);
 
 void setup() {
   // Initialize Serial1 for communication with main Particle device
@@ -61,9 +75,17 @@ void setup() {
     channelPowerPercent[i] = 0.0;
   }
   
+  // Initialize all TC fault codes to 0 (no fault)
+  for (int i = 0; i < NUM_TCS; i++) {
+    tcFaultCodes[i] = 0;
+  }
+  
+  // Initialize Serial1CommsManager (Serial1.begin() already called above)
+  serial1CommsManager.Begin(SERIAL1_BAUD);  // Begin() is now empty, kept for compatibility
+  
   delay(1000); // Give Serial1 time to initialize
   
-  Serial.println("TC Simulator Started");
+  Serial.println("TC Simulator Started (Async Mode)");
   Serial.print("Sending TC data for indices 0-");
   Serial.println(NUM_TCS - 1);
   Serial.print("Receiving power data for ");
@@ -74,10 +96,7 @@ void setup() {
 void loop() {
   unsigned long now = millis();
   
-  // Process incoming power data from COTS firmware over Serial1
-  processPowerData();
-  
-  // Update every second
+  // Update thermal simulation every second
   if ((now - lastUpdate) >= UPDATE_INTERVAL) {
     lastUpdate = now;
     
@@ -110,75 +129,57 @@ void loop() {
       // Update temperature
       simulatedTCValues[i] = Temp + Tdot * UPDATE_INTERVAL / 1000.0;   // °F
     }
+  }
+  
+  // Async communication - Process incoming power data
+  // Check if data is available but not yet processed (for debugging)
+  if(Serial1.available() > 0){
+    Serial.print("[DEBUG] Serial1.available() = ");
+    Serial.println(Serial1.available());
+  }
+  
+  if(serial1CommsManager.Update()){
+    // Display raw message received for debugging
+    String rawMsg = serial1CommsManager.GetLastRawMessage();
+    Serial.print("[RAW RX] ");
+    Serial.println(rawMsg);
     
-    // Create JSON document for all 50 TCs
-    DynamicJsonDocument tcDataDoc(6144);  // Increased size for 50 TCs (50 * ~100 bytes + overhead)
-    tcDataDoc["h"] = "tcSim"; // Header: thermocouple simulator
+    std::vector<ChannelPowerData> channelPowers = serial1CommsManager.ParseChannelPowerData(16);
     
-    // Create array of TC data
-    JsonArray tcArray = tcDataDoc.createNestedArray("tcs");
-    
-    for (int i = 0; i < NUM_TCS; i++) {
-      JsonObject tcObj = tcArray.createNestedObject();
-      tcObj["i"] = i;                    // Index
-      tcObj["t"] = round2(simulatedTCValues[i]); // Temperature
-      tcObj["fC"] = 0;                   // Fault code (0 = no fault)
+    // Display parsed data for debugging
+    Serial.print("[PARSED] Channels: ");
+    Serial.print(channelPowers.size());
+    Serial.print(" | Values: ");
+    for(unsigned int i = 0; i < channelPowers.size() && i < 5; i++){  // Show first 5
+      Serial.print("Ch");
+      Serial.print(channelPowers[i].channelIndex);
+      Serial.print("=");
+      Serial.print(channelPowers[i].powerPercent, 2);
+      if(i < channelPowers.size() - 1 && i < 4) Serial.print(", ");
     }
+    if(channelPowers.size() > 5) Serial.print("...");
+    Serial.println();
     
-    // Serialize and send over Serial1
-    String tcDataString;
-    serializeJson(tcDataDoc, tcDataString);
-    
-    // Check if serialization was successful (document not too small)
-    if (tcDataDoc.overflowed()) {
-      Serial.println("ERROR: TC data JSON document overflowed! Increase size.");
-    }
-    
-    // TODO: REMOVE DEBUG - Log sending info periodically
-    static unsigned long lastSendDebug = 0;
-    static int sendCount = 0;
-    if ((now - lastSendDebug) >= 10000) {  // Every 10 seconds
-      lastSendDebug = now;
-      Serial.print("[Sim] Sent TC data #");
-      Serial.print(++sendCount);
-      Serial.print(", length: ");
-      Serial.print(tcDataString.length());
-      Serial.print(" bytes, TCs: ");
-      Serial.print(NUM_TCS);
-      Serial.print(", time: ");
-      Serial.println(now);
-      
-      // Show first 200 chars
-      int showLen = min(200, (int)tcDataString.length());
-      Serial.print("[Sim] Message preview (first ");
-      Serial.print(showLen);
-      Serial.print(" chars): ");
-      Serial.println(tcDataString.substring(0, showLen));
-    }
-    
-    // Send with explicit newline
-    Serial1.print(tcDataString);
-    Serial1.print('\n');  // Explicit newline to ensure message delimiter
-    
-    // Optional: Also print to Serial for debugging
-    // Serial.println("Sent: " + tcDataString);
-    // TODO: REMOVE DEBUG - Print all channels for debugging (every 10 seconds to reduce spam)
-    static unsigned long lastPowerPrint = 0;
-    if ((now - lastPowerPrint) >= 10000) {
-      lastPowerPrint = now;
-      Serial.print("Power (all ");
-      Serial.print(NUM_CHANNELS);
-      Serial.print(" channels): ");
-      for (int i = 0; i < NUM_CHANNELS; i++) {
-        Serial.print("Ch");
-        Serial.print(i);
-        Serial.print("=");
-        Serial.print(channelPowerPercent[i]);
-        Serial.print("%");
-        if (i < NUM_CHANNELS - 1) Serial.print(", ");
+    // Update power values in our array
+    for(unsigned int i = 0; i < channelPowers.size(); i++){
+      int chIndex = channelPowers[i].channelIndex;
+      if(chIndex >= 0 && chIndex < NUM_CHANNELS){
+        channelPowerPercent[chIndex] = channelPowers[i].powerPercent;
+        
+        // Clamp to 0-100%
+        if(channelPowerPercent[chIndex] < 0.0) channelPowerPercent[chIndex] = 0.0;
+        if(channelPowerPercent[chIndex] > 100.0) channelPowerPercent[chIndex] = 100.0;
       }
-      Serial.println();
     }
+  }
+  
+  // Send TC data periodically (every 1 second)
+  if((now - lastTcSend) >= TC_SEND_INTERVAL_MS){
+    lastTcSend = now;
+    
+    // Format and send TC data
+    String tcDataString = FormatTCDataForSend(simulatedTCValues, tcFaultCodes, NUM_TCS, 3);
+    serial1CommsManager.WriteSerialMessage(tcDataString + "$");
   }
   
   Particle.process();
@@ -189,70 +190,25 @@ double round2(double value) {
   return (int)(value * 100 + 0.5) / 100.0;
 }
 
-// Process power data received from COTS firmware over Serial1
-// Message format: {"h":"power", "p":[ch0, ch1, ..., ch15]}
-// Power data is sent every 250ms from COTS firmware
-// Power values match channel status "p" field (bitToPercent(GetOutputValue()))
-void processPowerData() {
-  // Check Serial1 for incoming data
-  while (Serial1.available()) {
-    char c = Serial1.read();
-    if (c == '\n' || c == '\r') {
-      if (serial1Buffer.length() > 0) {
-        // Try to parse JSON
-        DynamicJsonDocument doc(1024);  // Increased size for 16 channels
-        DeserializationError error = deserializeJson(doc, serial1Buffer);
-        
-        if (!error && doc["h"] == "power") {
-          // Valid power data message - matches channel status "p" field format
-          if (doc.containsKey("p") && doc["p"].is<JsonArray>()) {
-            JsonArray powerArray = doc["p"];
-            int arraySize = powerArray.size();
-            
-            // Update power percentages for all channels (0-15)
-            int channelsUpdated = 0;
-            for (int i = 0; i < NUM_CHANNELS && i < arraySize; i++) {
-              if (powerArray[i].is<double>()) {
-                channelPowerPercent[i] = powerArray[i].as<double>();
-                
-                // Clamp to 0-100%
-                if (channelPowerPercent[i] < 0.0) channelPowerPercent[i] = 0.0;
-                if (channelPowerPercent[i] > 100.0) channelPowerPercent[i] = 100.0;
-                channelsUpdated++;
-              }
-            }
-            
-            // TODO: REMOVE DEBUG - Log if we didn't receive all expected channels
-            if (arraySize < NUM_CHANNELS) {
-              Serial.print("Warning: Received ");
-              Serial.print(arraySize);
-              Serial.print(" channels, expected ");
-              Serial.println(NUM_CHANNELS);
-            }
-          } else {
-            // TODO: REMOVE DEBUG - Missing power array warning
-            Serial.println("Warning: Power message missing 'p' array");
-          }
-        } else if (!error) {
-          // Not a power message, might be other data
-          // Serial.println("Received non-power message");
-        } else {
-          // TODO: REMOVE DEBUG - JSON parse error
-          Serial.print("JSON parse error: ");
-          Serial.println(error.c_str());
-        }
-        
-        serial1Buffer = ""; // Clear buffer
-      }
-    } else {
-      serial1Buffer += c;
-      
-      // Prevent buffer overflow
-      if (serial1Buffer.length() > 1024) {  // Increased buffer size
-        serial1Buffer = "";
-      }
-    }
+// Format TC data for sending back to firmware
+// Takes TC values and returns a comma-separated string ready to send with $
+// Format: index0,temp0,fault0,index1,temp1,fault1,...
+String FormatTCDataForSend(double tcValues[], int tcFaultCodes[], int numTCs, int valuesPerTC) {
+  String output = "";
+  
+  for (int i = 0; i < numTCs; i++) {
+    if (i > 0) output += ",";
+    
+    output += String(i);           // TC index
+    output += ",";
+    output += String(round2(tcValues[i]), 2); // Temperature (2 decimal places)
+    output += ",";
+    output += String(tcFaultCodes[i]);        // Fault code
   }
+  
+  return output;
 }
+
+// Old synchronous protocol removed - now using async Serial1CommsManager
 
 
