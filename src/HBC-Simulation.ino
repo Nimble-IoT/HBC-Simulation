@@ -27,8 +27,8 @@ Serial1CommsManager serial1CommsManager(Serial1);
 #define SERIAL1_BAUD 115200
 
 // Update intervals
-#define UPDATE_INTERVAL 1000  // Thermal simulation update (1 second)
-#define TC_SEND_INTERVAL_MS 1000  // Send TC data every 1 second
+#define UPDATE_INTERVAL 500  // Thermal simulation update (1 second)
+#define TC_SEND_INTERVAL_MS 500  // Send TC data every 500ms
 
 // Initial simulated TC values
 // Set them all to 70.00 Deg F
@@ -194,7 +194,11 @@ double round2(double value) {
 // Takes TC values and returns a comma-separated string ready to send with $
 // Format: index0,temp0,fault0,index1,temp1,fault1,...
 String FormatTCDataForSend(double tcValues[], int tcFaultCodes[], int numTCs, int valuesPerTC) {
+  // MEMORY FIX: Pre-allocate string capacity to avoid multiple reallocations
+  // Estimate: ~10 chars per TC (index, temp, fault + commas) * numTCs
+  int estimatedLength = numTCs * 12; // 12 chars per TC with some margin
   String output = "";
+  output.reserve(estimatedLength);
   
   for (int i = 0; i < numTCs; i++) {
     if (i > 0) output += ",";

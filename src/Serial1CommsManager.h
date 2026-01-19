@@ -7,7 +7,16 @@
 
 // Inline parser function (so this class can be used standalone)
 namespace Serial1Parser {
-  static std::vector<String> parseArguments(String argumentString, String delimiter, int bufferSize = 622){
+  static std::vector<String> parseArguments(String argumentString, String delimiter, int bufferSize = 1024){
+    // Allocate buffer on stack - limit size to prevent stack overflow
+    if(bufferSize > 2048) bufferSize = 2048; // Cap at 2KB for safety
+    
+    // Check if string is too long before copying
+    if(argumentString.length() >= bufferSize - 1) {
+      // String too long - return empty vector
+      return std::vector<String>();
+    }
+    
     char argumentBuf[bufferSize];
     argumentString.toCharArray(argumentBuf, bufferSize);
     
@@ -20,7 +29,9 @@ namespace Serial1Parser {
     pch = strtok (argumentBuf, delimiterBuf);
     while (pch != NULL)
     {
-      result.push_back(pch);
+      // CRITICAL FIX: Create a copy of the string instead of storing pointer
+      // The pointer from strtok becomes invalid when buffer goes out of scope
+      result.push_back(String(pch)); // String constructor copies the C-string
       pch = strtok (NULL, delimiterBuf);
     }
     return result;
@@ -35,6 +46,9 @@ struct ChannelPowerData {
 
 class Serial1CommsManager {
   public:
+    // Maximum message buffer size to prevent memory exhaustion
+    static const int MAX_MESSAGE_LENGTH = 2048;
+    
     // Constructor
     Serial1CommsManager(Stream& _serial1):serial1(_serial1){}
 
@@ -69,6 +83,14 @@ class Serial1CommsManager {
             messageBuffer = ""; // Clear buffer for next message
           }
         } else {
+          // MEMORY FIX: Check buffer length to prevent unbounded growth
+          // If buffer is too long, discard and reset to prevent memory exhaustion
+          if(messageBuffer.length() >= MAX_MESSAGE_LENGTH){
+            // Buffer overflow protection - discard malformed message
+            messageBuffer = "";
+            // Could optionally set an error flag here
+            continue;
+          }
           // Accumulate characters until we find '$'
           messageBuffer += c;
         }
