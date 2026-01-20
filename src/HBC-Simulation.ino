@@ -27,7 +27,7 @@ Serial1CommsManager serial1CommsManager(Serial1);
 #define SERIAL1_BAUD 115200
 
 // Update intervals
-#define UPDATE_INTERVAL 500  // Thermal simulation update (1 second)
+#define UPDATE_INTERVAL 500  // Thermal simulation update (500 ms )
 #define TC_SEND_INTERVAL_MS 500  // Send TC data every 500ms
 
 // Initial simulated TC values
@@ -49,6 +49,20 @@ double channelPowerPercent[NUM_CHANNELS];
 unsigned long lastUpdate = 0;
 unsigned long lastTcSend = 0;
 int tcFaultCodes[NUM_TCS];  // TC fault codes array
+
+// Fault simulation mode
+enum FaultSimulationMode {
+  MODE_NORMAL = 0,    // Use power values from Serial1 as normal
+  MODE_FAULT_ZERO = 1,  // Override selected channels to 0%
+  MODE_FAULT_FULL = 2   // Override selected channels to 100%
+};
+
+FaultSimulationMode faultMode = MODE_NORMAL;
+bool faultChannelMask[NUM_CHANNELS];  // true = channel is in fault mode, false = normal
+
+// Forward declarations for Particle cloud functions
+int setFaultSimulation(String command);  // Format: "CH,Mode" where CH is channels and Mode is normal/zero/max
+int getFaultStatus(String command);
 
 // Forward declaration
 String FormatTCDataForSend(double tcValues[], int tcFaultCodes[], int numTCs, int valuesPerTC = 3);
@@ -80,6 +94,16 @@ void setup() {
     tcFaultCodes[i] = 0;
   }
   
+  // Initialize fault channel mask (all channels start in normal mode)
+  for (int i = 0; i < NUM_CHANNELS; i++) {
+    faultChannelMask[i] = false;
+  }
+  faultMode = MODE_NORMAL;
+  
+  // Register Particle cloud functions
+  Particle.function("setFaultSimulation", setFaultSimulation);
+  Particle.function("getFaultStatus", getFaultStatus);
+  
   // Initialize Serial1CommsManager (Serial1.begin() already called above)
   serial1CommsManager.Begin(SERIAL1_BAUD);  // Begin() is now empty, kept for compatibility
   
@@ -91,6 +115,7 @@ void setup() {
   Serial.print("Receiving power data for ");
   Serial.print(NUM_CHANNELS);
   Serial.println(" channels from COTS firmware over Serial1");
+  Serial.println("Fault simulation mode: NORMAL");
 }
 
 void loop() {
@@ -114,6 +139,16 @@ void loop() {
       }
       
       double powerPercent = (channelIndex >= 0) ? channelPowerPercent[channelIndex] : 0.0;
+      
+      // Apply fault simulation overrides if channel is in fault mode
+      if (channelIndex >= 0 && channelIndex < NUM_CHANNELS && faultChannelMask[channelIndex]) {
+        if (faultMode == MODE_FAULT_ZERO) {
+          powerPercent = 0.0;
+        } else if (faultMode == MODE_FAULT_FULL) {
+          powerPercent = 100.0;
+        }
+        // MODE_NORMAL: use original powerPercent (no override)
+      }
       
       // Convert power percentage to actual power (W)
       double Powerin = (powerPercent / 100.0) * MAX_POWER;
@@ -213,6 +248,84 @@ String FormatTCDataForSend(double tcValues[], int tcFaultCodes[], int numTCs, in
   return output;
 }
 
-// Old synchronous protocol removed - now using async Serial1CommsManager
+// Set fault simulation for a single channel
+// Command format: "CH,Mode" where:
+//   CH = single channel number (0-15)
+//   Mode = "normal", "zero", or "max"
+// Examples:
+//   "0,zero"      - Channel 0 forced to 0%
+//   "5,max"       - Channel 5 forced to 100%
+//   "3,normal"    - Channel 3 uses normal power from Serial1
+// Returns: 0 on success, -1 on error
+int setFaultSimulation(String command) {
+  command.trim();
+  command.toLowerCase();
+  
+  int commaIdx = command.indexOf(',');
+  if (commaIdx == -1) {
+    return -1;
+  }
+  
+  String channelStr = command.substring(0, commaIdx);
+  String modeSpec = command.substring(commaIdx + 1);
+  channelStr.trim();
+  modeSpec.trim();
+  
+  // Parse channel number
+  int channelNum = channelStr.toInt();
+  if (channelNum < 0 || channelNum >= NUM_CHANNELS) {
+    return -1;
+  }
+  
+  // Parse and set the mode
+  if (modeSpec == "normal") {
+    faultMode = MODE_NORMAL;
+    faultChannelMask[channelNum] = false;
+  } else if (modeSpec == "zero") {
+    faultMode = MODE_FAULT_ZERO;
+    faultChannelMask[channelNum] = true;
+  } else if (modeSpec == "max") {
+    faultMode = MODE_FAULT_FULL;
+    faultChannelMask[channelNum] = true;
+  } else {
+    return -1;
+  }
+  
+  return 0;
+}
 
+// Get current fault simulation status
+// Returns: Status string with mode and affected channels
+int getFaultStatus(String command) {
+  String modeStr;
+  switch (faultMode) {
+    case MODE_NORMAL:
+      modeStr = "NORMAL";
+      break;
+    case MODE_FAULT_ZERO:
+      modeStr = "FAULT_ZERO";
+      break;
+    case MODE_FAULT_FULL:
+      modeStr = "FAULT_MAX";
+      break;
+    default:
+      modeStr = "UNKNOWN";
+      break;
+  }
+  
+  // Build list of affected channels
+  String channelList = "";
+  int count = 0;
+  for (int i = 0; i < NUM_CHANNELS; i++) {
+    if (faultChannelMask[i]) {
+      if (count > 0) channelList += ",";
+      channelList += String(i);
+      count++;
+    }
+  }
+  if (count == 0) {
+    channelList = "none";
+  }
+  return 0;
+}
 
