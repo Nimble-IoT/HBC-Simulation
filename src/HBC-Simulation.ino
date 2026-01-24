@@ -27,8 +27,8 @@ Serial1CommsManager serial1CommsManager(Serial1);
 #define SERIAL1_BAUD 115200
 
 // Update intervals
-#define UPDATE_INTERVAL 500  // Thermal simulation update (1 second)
-#define TC_SEND_INTERVAL_MS 500  // Send TC data every 500ms
+#define UPDATE_INTERVAL 1000  // Thermal simulation update (1 second)
+#define TC_SEND_INTERVAL_MS 500  // Send TC data every 0.5 seconds (ensures fresh data for 1-second interface updates)
 
 // Initial simulated TC values
 // Set them all to 70.00 Deg F
@@ -131,44 +131,54 @@ void loop() {
     }
   }
   
-  // Async communication - Process incoming power data
-  // Check if data is available but not yet processed (for debugging)
-  if(Serial1.available() > 0){
-    Serial.print("[DEBUG] Serial1.available() = ");
-    Serial.println(Serial1.available());
-  }
-  
+  // Async communication - Process incoming messages (power or memory)
   if(serial1CommsManager.Update()){
-    // Display raw message received for debugging
-    String rawMsg = serial1CommsManager.GetLastRawMessage();
-    Serial.print("[RAW RX] ");
-    Serial.println(rawMsg);
+    String messageType = serial1CommsManager.GetMessageType();
     
-    std::vector<ChannelPowerData> channelPowers = serial1CommsManager.ParseChannelPowerData(16);
-    
-    // Display parsed data for debugging
-    Serial.print("[PARSED] Channels: ");
-    Serial.print(channelPowers.size());
-    Serial.print(" | Values: ");
-    for(unsigned int i = 0; i < channelPowers.size() && i < 5; i++){  // Show first 5
-      Serial.print("Ch");
-      Serial.print(channelPowers[i].channelIndex);
-      Serial.print("=");
-      Serial.print(channelPowers[i].powerPercent, 2);
-      if(i < channelPowers.size() - 1 && i < 4) Serial.print(", ");
-    }
-    if(channelPowers.size() > 5) Serial.print("...");
-    Serial.println();
-    
-    // Update power values in our array
-    for(unsigned int i = 0; i < channelPowers.size(); i++){
-      int chIndex = channelPowers[i].channelIndex;
-      if(chIndex >= 0 && chIndex < NUM_CHANNELS){
-        channelPowerPercent[chIndex] = channelPowers[i].powerPercent;
-        
-        // Clamp to 0-100%
-        if(channelPowerPercent[chIndex] < 0.0) channelPowerPercent[chIndex] = 0.0;
-        if(channelPowerPercent[chIndex] > 100.0) channelPowerPercent[chIndex] = 100.0;
+    // Route messages based on header type
+    if(messageType == "power"){
+      // JSON power data format: {"h":"power","p":[val1,val2,...]}
+      std::vector<ChannelPowerData> channelPowers = serial1CommsManager.ParsePowerDataJson(16);
+      
+      // Update power values in our array
+      for(unsigned int i = 0; i < channelPowers.size(); i++){
+        int chIndex = channelPowers[i].channelIndex;
+        if(chIndex >= 0 && chIndex < NUM_CHANNELS){
+          channelPowerPercent[chIndex] = channelPowers[i].powerPercent;
+          
+          // Clamp to 0-100%
+          if(channelPowerPercent[chIndex] < 0.0) channelPowerPercent[chIndex] = 0.0;
+          if(channelPowerPercent[chIndex] > 100.0) channelPowerPercent[chIndex] = 100.0;
+        }
+      }
+    } else if(messageType == "memory"){
+      // JSON memory statistics format: {"h":"memory","mT":...,"mL":...,"mF":...}
+      MemoryStats memStats;
+      if(serial1CommsManager.ParseMemoryStatsJson(memStats)){
+        // Memory stats received - can be logged or forwarded to interface
+        // For now, just print to Serial for debugging
+        Serial.print("Memory Stats - Total: ");
+        Serial.print(memStats.totalFree);
+        Serial.print(" bytes, Largest: ");
+        Serial.print(memStats.largestBlock);
+        Serial.print(" bytes, Fragmentation: ");
+        Serial.print(memStats.fragmentation);
+        Serial.println("%");
+      }
+    } else if(messageType.length() == 0){
+      // Legacy CSV format (backward compatibility)
+      std::vector<ChannelPowerData> channelPowers = serial1CommsManager.ParseChannelPowerData(16);
+      
+      // Update power values in our array
+      for(unsigned int i = 0; i < channelPowers.size(); i++){
+        int chIndex = channelPowers[i].channelIndex;
+        if(chIndex >= 0 && chIndex < NUM_CHANNELS){
+          channelPowerPercent[chIndex] = channelPowers[i].powerPercent;
+          
+          // Clamp to 0-100%
+          if(channelPowerPercent[chIndex] < 0.0) channelPowerPercent[chIndex] = 0.0;
+          if(channelPowerPercent[chIndex] > 100.0) channelPowerPercent[chIndex] = 100.0;
+        }
       }
     }
   }
@@ -177,8 +187,21 @@ void loop() {
   if((now - lastTcSend) >= TC_SEND_INTERVAL_MS){
     lastTcSend = now;
     
-    // Format and send TC data
-    String tcDataString = FormatTCDataForSend(simulatedTCValues, tcFaultCodes, NUM_TCS, 3);
+    // Format and send TC data as JSON with header (uniform with power and memory messages)
+    // Format: {"h":"tc","d":[0,70.00,0,1,70.00,0,...]}
+    StaticJsonDocument<3072> tcDoc; // Large enough for 50 TCs (50 * 3 * ~20 bytes)
+    tcDoc["h"] = "tc";
+    JsonArray tcDataArray = tcDoc.createNestedArray("d");
+    
+    for(int i = 0; i < NUM_TCS; i++){
+      tcDataArray.add(i);                    // TC index
+      double tcTemp = round2(simulatedTCValues[i]);
+      tcDataArray.add(tcTemp); // Temperature
+      tcDataArray.add(tcFaultCodes[i]);      // Fault code
+    }
+    
+    String tcDataString;
+    serializeJson(tcDoc, tcDataString);
     serial1CommsManager.WriteSerialMessage(tcDataString + "$");
   }
   

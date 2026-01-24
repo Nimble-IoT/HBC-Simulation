@@ -4,6 +4,7 @@
 #include <vector>
 #include <Arduino.h>
 #include <string.h>
+#include <ArduinoJson.h>
 
 // Inline parser function (so this class can be used standalone)
 namespace Serial1Parser {
@@ -44,6 +45,13 @@ struct ChannelPowerData {
   double powerPercent; // Power percentage (0-100)
 };
 
+// Memory Statistics Structure - holds memory monitoring data
+struct MemoryStats {
+  int totalFree;      // Total free memory (bytes)
+  int largestBlock;  // Largest contiguous free block (bytes)
+  float fragmentation; // Fragmentation percentage (0-100)
+};
+
 class Serial1CommsManager {
   public:
     // Maximum message buffer size to prevent memory exhaustion
@@ -78,8 +86,17 @@ class Serial1CommsManager {
           if(messageBuffer.length() > 0){
             // Store the raw message for debugging
             lastRawMessage = messageBuffer;
-            // Parse the received data into array/variables
-            parsedData = Serial1Parser::parseArguments(messageBuffer, ",");
+            
+            // Detect message type: JSON starts with '{', CSV starts with number or comma
+            if(messageBuffer.length() > 0 && messageBuffer.charAt(0) == '{'){
+              // JSON message - parse and extract header
+              parseJsonMessage(messageBuffer);
+            } else {
+              // Legacy CSV format - parse comma-separated values
+              parsedData = Serial1Parser::parseArguments(messageBuffer, ",");
+              messageType = ""; // Clear message type for CSV
+            }
+            
             messageBuffer = ""; // Clear buffer for next message
           }
         } else {
@@ -97,6 +114,30 @@ class Serial1CommsManager {
       }
       
       return gotData;
+    }
+    
+    // Parse JSON message and extract header type
+    void parseJsonMessage(String jsonString){
+      // Use StaticJsonDocument to avoid heap allocation
+      StaticJsonDocument<512> doc;
+      DeserializationError error = deserializeJson(doc, jsonString);
+      
+      if(error){
+        // JSON parsing failed - treat as unknown
+        messageType = "";
+        parsedData.clear();
+        return;
+      }
+      
+      // Extract message type from "h" field
+      if(doc.containsKey("h")){
+        messageType = doc["h"].as<String>();
+      } else {
+        messageType = "";
+      }
+      
+      // Store the JSON document for later parsing
+      lastJsonMessage = jsonString;
     }
     
     // Get the last raw message received (before parsing)
@@ -122,7 +163,73 @@ class Serial1CommsManager {
       return parsedData.size();
     }
 
-    // Parse 16 channel power data from parsed payload
+    // Get the message type (header "h" field from JSON, or empty for CSV)
+    String GetMessageType(){
+      return messageType;
+    }
+    
+    // Parse power data from JSON message
+    // Expected JSON format: {"h":"power","p":[val1,val2,...]}
+    // Returns vector of ChannelPowerData structures
+    std::vector<ChannelPowerData> ParsePowerDataJson(int maxChannels = 16){
+      std::vector<ChannelPowerData> channelPowerArray;
+      
+      if(messageType != "power" || lastJsonMessage.length() == 0){
+        return channelPowerArray; // Not a power message
+      }
+      
+      // Parse JSON
+      StaticJsonDocument<256> doc; // Power messages are small, 256 should be enough
+      DeserializationError error = deserializeJson(doc, lastJsonMessage);
+      
+      if(error || !doc.containsKey("p")){
+        return channelPowerArray; // Invalid JSON or missing "p" array
+      }
+      
+      JsonArray powerArray = doc["p"];
+      int numChannels = powerArray.size();
+      if(numChannels > maxChannels) numChannels = maxChannels;
+      
+      for(int ch = 0; ch < numChannels; ch++){
+        ChannelPowerData chPower;
+        chPower.channelIndex = ch;
+        chPower.powerPercent = powerArray[ch].as<float>();
+        channelPowerArray.push_back(chPower);
+      }
+      
+      return channelPowerArray;
+    }
+    
+    // Parse memory statistics from JSON message
+    // Expected JSON format: {"h":"memory","mT":...,"mL":...,"mF":...}
+    // Returns MemoryStats structure, or returns false if not a memory message
+    bool ParseMemoryStatsJson(MemoryStats& stats){
+      if(messageType != "memory" || lastJsonMessage.length() == 0){
+        return false; // Not a memory message
+      }
+      
+      // Parse JSON
+      StaticJsonDocument<256> doc;
+      DeserializationError error = deserializeJson(doc, lastJsonMessage);
+      
+      if(error){
+        return false; // Invalid JSON
+      }
+      
+      // Extract memory statistics
+      if(doc.containsKey("mT")) stats.totalFree = doc["mT"].as<int>();
+      else return false;
+      
+      if(doc.containsKey("mL")) stats.largestBlock = doc["mL"].as<int>();
+      else return false;
+      
+      if(doc.containsKey("mF")) stats.fragmentation = doc["mF"].as<float>();
+      else return false;
+      
+      return true;
+    }
+    
+    // Parse 16 channel power data from CSV format (legacy support)
     // Expected format: channel0Power,channel1Power,...,channel15Power
     // Returns vector of ChannelPowerData structures
     std::vector<ChannelPowerData> ParseChannelPowerData(int maxChannels = 16){
@@ -158,6 +265,8 @@ class Serial1CommsManager {
     std::vector<String> parsedData;
     String lastRawMessage;  // Store last raw message for debugging
     String messageBuffer;   // Buffer for accumulating message characters
+    String messageType;     // Message type from JSON "h" field (e.g., "power", "memory")
+    String lastJsonMessage; // Store last JSON message for parsing
 };
 #endif
 
