@@ -1,8 +1,8 @@
 /*
- * TC Simulator Firmware
- * Description: Simulates 50 thermocouples (TCs 0-49) and sends data over Serial1
- * Author: Auto-generated for HBC-COTS-Firmware test bench
- * Date: 2024
+ * TC Simulator Firmware (Simplified)
+ * Description: Emits thermocouple readings as JSON over Serial1 using the same
+ *              message format as the main firmware expects:
+ *              {"h":"tc","d":[idx,temp,fault, idx,temp,fault, ...]}$
  */
 
 SYSTEM_THREAD(ENABLED);
@@ -10,15 +10,7 @@ SYSTEM_THREAD(ENABLED);
 // Define connection options
 #define ARDUINOJSON_ENABLE_ARDUINO_STRING 1
 #include <ArduinoJson.h>
-#include <string.h>
 #include "Serial1CommsManager.h"
-
-// TC Data Structure - holds all values for a single thermocouple
-struct TCData {
-  int index;           // TC index (0-49)
-  double temperature;  // TC reading in degrees
-  int faultCode;       // TC error/fault code (0 = no error)
-};
 
 // Serial1CommsManager instance
 Serial1CommsManager serial1CommsManager(Serial1);
@@ -49,9 +41,6 @@ double channelPowerPercent[NUM_CHANNELS];
 unsigned long lastUpdate = 0;
 unsigned long lastTcSend = 0;
 int tcFaultCodes[NUM_TCS];  // TC fault codes array
-
-// Forward declaration
-String FormatTCDataForSend(double tcValues[], int tcFaultCodes[], int numTCs, int valuesPerTC = 3);
 
 void setup() {
   // Initialize Serial1 for communication with main Particle device
@@ -90,7 +79,7 @@ void setup() {
   Serial.println(NUM_TCS - 1);
   Serial.print("Receiving power data for ");
   Serial.print(NUM_CHANNELS);
-  Serial.println(" channels from COTS firmware over Serial1");
+  Serial.println(" channels from main firmware over Serial1");
 }
 
 void loop() {
@@ -165,25 +154,10 @@ void loop() {
         Serial.print(memStats.fragmentation);
         Serial.println("%");
       }
-    } else if(messageType.length() == 0){
-      // Legacy CSV format (backward compatibility)
-      std::vector<ChannelPowerData> channelPowers = serial1CommsManager.ParseChannelPowerData(16);
-      
-      // Update power values in our array
-      for(unsigned int i = 0; i < channelPowers.size(); i++){
-        int chIndex = channelPowers[i].channelIndex;
-        if(chIndex >= 0 && chIndex < NUM_CHANNELS){
-          channelPowerPercent[chIndex] = channelPowers[i].powerPercent;
-          
-          // Clamp to 0-100%
-          if(channelPowerPercent[chIndex] < 0.0) channelPowerPercent[chIndex] = 0.0;
-          if(channelPowerPercent[chIndex] > 100.0) channelPowerPercent[chIndex] = 100.0;
-        }
-      }
     }
   }
   
-  // Send TC data periodically (every 1 second)
+  // Send TC data periodically
   if((now - lastTcSend) >= TC_SEND_INTERVAL_MS){
     lastTcSend = now;
     
@@ -212,30 +186,3 @@ void loop() {
 double round2(double value) {
   return (int)(value * 100 + 0.5) / 100.0;
 }
-
-// Format TC data for sending back to firmware
-// Takes TC values and returns a comma-separated string ready to send with $
-// Format: index0,temp0,fault0,index1,temp1,fault1,...
-String FormatTCDataForSend(double tcValues[], int tcFaultCodes[], int numTCs, int valuesPerTC) {
-  // MEMORY FIX: Pre-allocate string capacity to avoid multiple reallocations
-  // Estimate: ~10 chars per TC (index, temp, fault + commas) * numTCs
-  int estimatedLength = numTCs * 12; // 12 chars per TC with some margin
-  String output = "";
-  output.reserve(estimatedLength);
-  
-  for (int i = 0; i < numTCs; i++) {
-    if (i > 0) output += ",";
-    
-    output += String(i);           // TC index
-    output += ",";
-    output += String(round2(tcValues[i]), 2); // Temperature (2 decimal places)
-    output += ",";
-    output += String(tcFaultCodes[i]);        // Fault code
-  }
-  
-  return output;
-}
-
-// Old synchronous protocol removed - now using async Serial1CommsManager
-
-
