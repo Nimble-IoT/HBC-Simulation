@@ -1,8 +1,8 @@
 /*
  * TC Simulator Firmware (Simplified)
- * Description: Emits thermocouple readings as JSON over Serial1 using the same
- *              message format as the main firmware expects:
- *              {"h":"tc","d":[idx,temp,fault, idx,temp,fault, ...]}$
+ * Description: Emits thermocouple readings as JSON over Serial1:
+ *              {"h":"tc","d":[0,70.00,0,1,70.00,0,2,70.00,0,...]}$
+ *              Flat array format: triplets of (index, temperature, faultCode)
  */
 
 SYSTEM_THREAD(ENABLED);
@@ -20,7 +20,7 @@ Serial1CommsManager serial1CommsManager(Serial1);
 
 // Update intervals
 #define UPDATE_INTERVAL 1000  // Thermal simulation update (1 second)
-#define TC_SEND_INTERVAL_MS 500  // Send TC data every 0.5 seconds (ensures fresh data for 1-second interface updates)
+#define TC_SEND_INTERVAL_MS 1000  // Send TC data every 1 second (matches interface update rate)
 
 // Initial simulated TC values
 // Set them all to 70.00 Deg F
@@ -120,14 +120,22 @@ void loop() {
     }
   }
   
-  // Async communication - Process incoming messages (power or memory)
+  // Async communication - Process incoming messages (power)
   if(serial1CommsManager.Update()){
-    String messageType = serial1CommsManager.GetMessageType();
+    const char* messageType = serial1CommsManager.GetMessageTypeCStr();
     
     // Route messages based on header type
-    if(messageType == "power"){
+    if(messageType && strcmp(messageType, "power") == 0){
       // JSON power data format: {"h":"power","p":[val1,val2,...]}
       std::vector<ChannelPowerData> channelPowers = serial1CommsManager.ParsePowerDataJson(16);
+      
+      // Display received power values
+      Serial.print("RECV POWER: [");
+      for(unsigned int i = 0; i < channelPowers.size() && i < NUM_CHANNELS; i++){
+        if(i > 0) Serial.print(",");
+        Serial.print(channelPowers[i].powerPercent, 1);
+      }
+      Serial.println("]");
       
       // Update power values in our array
       for(unsigned int i = 0; i < channelPowers.size(); i++){
@@ -140,20 +148,6 @@ void loop() {
           if(channelPowerPercent[chIndex] > 100.0) channelPowerPercent[chIndex] = 100.0;
         }
       }
-    } else if(messageType == "memory"){
-      // JSON memory statistics format: {"h":"memory","mT":...,"mL":...,"mF":...}
-      MemoryStats memStats;
-      if(serial1CommsManager.ParseMemoryStatsJson(memStats)){
-        // Memory stats received - can be logged or forwarded to interface
-        // For now, just print to Serial for debugging
-        Serial.print("Memory Stats - Total: ");
-        Serial.print(memStats.totalFree);
-        Serial.print(" bytes, Largest: ");
-        Serial.print(memStats.largestBlock);
-        Serial.print(" bytes, Fragmentation: ");
-        Serial.print(memStats.fragmentation);
-        Serial.println("%");
-      }
     }
   }
   
@@ -161,22 +155,37 @@ void loop() {
   if((now - lastTcSend) >= TC_SEND_INTERVAL_MS){
     lastTcSend = now;
     
-    // Format and send TC data as JSON with header (uniform with power and memory messages)
-    // Format: {"h":"tc","d":[0,70.00,0,1,70.00,0,...]}
-    StaticJsonDocument<3072> tcDoc; // Large enough for 50 TCs (50 * 3 * ~20 bytes)
+    // Format and send all TCs in one message (flat array format)
+    // Format: {"h":"tc","d":[0,70.00,0,1,70.00,0,2,70.00,0,...]}$
+    // Triplets: index, temperature, faultCode
+    // Use StaticJsonDocument with static storage to avoid heap allocation
+    static StaticJsonDocument<2048> tcDoc; // Large enough for 50 TCs (150 values)
+    tcDoc.clear();
     tcDoc["h"] = "tc";
     JsonArray tcDataArray = tcDoc.createNestedArray("d");
     
     for(int i = 0; i < NUM_TCS; i++){
       tcDataArray.add(i);                    // TC index
       double tcTemp = round2(simulatedTCValues[i]);
-      tcDataArray.add(tcTemp); // Temperature
+      tcDataArray.add(tcTemp);               // Temperature
       tcDataArray.add(tcFaultCodes[i]);      // Fault code
     }
     
-    String tcDataString;
-    serializeJson(tcDoc, tcDataString);
-    serial1CommsManager.WriteSerialMessage(tcDataString + "$");
+    // Serialize to static buffer and send - no heap allocation
+    static char tcDataBuffer[2560];  // Buffer for TC JSON (2048 + overhead)
+    serializeJson(tcDoc, tcDataBuffer, sizeof(tcDataBuffer));
+    // Append '$' delimiter
+    size_t len = strlen(tcDataBuffer);
+    if(len < sizeof(tcDataBuffer) - 2){
+      tcDataBuffer[len] = '$';
+      tcDataBuffer[len + 1] = '\0';
+    }
+    
+    // Display raw message being sent
+    Serial.print("SEND TC: ");
+    Serial.println(tcDataBuffer);
+    
+    serial1CommsManager.WriteSerialMessage(tcDataBuffer);
   }
   
   Particle.process();
