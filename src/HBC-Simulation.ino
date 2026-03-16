@@ -325,7 +325,11 @@ void loop() {
   
   // Async communication - Process incoming messages (power)
   if(serial1CommsManager.Update()){
+    const char* rawMessage = serial1CommsManager.GetLastRawMessageCStr();
     const char* messageType = serial1CommsManager.GetMessageTypeCStr();
+
+    Serial.print("RAW SERIAL1: ");
+    Serial.println(rawMessage);
     
     // Route messages based on header type
     if(messageType && strcmp(messageType, "power") == 0){
@@ -351,6 +355,8 @@ void loop() {
           if(channelPowerPercent[chIndex] > 100.0) channelPowerPercent[chIndex] = 100.0;
         }
       }
+    } else {
+      Serial.println(serial1CommsManager.LastJsonParseSucceeded() ? "RAW SERIAL1: unsupported message type" : "RAW SERIAL1: JSON parse failed");
     }
   }
   

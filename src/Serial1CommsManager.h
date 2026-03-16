@@ -18,8 +18,10 @@ class Serial1CommsManager {
     // Constructor
     Serial1CommsManager(Stream& _serial1):serial1(_serial1), messageBufferIndex(0){
       messageBuffer[0] = '\0';
+      lastRawBuffer[0] = '\0';
       lastJsonBuffer[0] = '\0';
       messageTypeBuffer[0] = '\0';
+      lastJsonParseSucceeded = false;
     }
 
     void Begin(unsigned long baudRate = 115200){
@@ -47,6 +49,9 @@ class Serial1CommsManager {
           if(messageBufferIndex > 0){
             gotData = true;
             messageBuffer[messageBufferIndex] = '\0';
+            strncpy(lastRawBuffer, messageBuffer, sizeof(lastRawBuffer) - 1);
+            lastRawBuffer[sizeof(lastRawBuffer) - 1] = '\0';
+            lastJsonParseSucceeded = false;
             
             // Parse JSON and extract header type
             if(messageBuffer[0] == '{'){
@@ -75,14 +80,16 @@ class Serial1CommsManager {
     
     // Parse JSON message and extract header type
     void parseJsonMessage(const char* jsonString){
-      // Use StaticJsonDocument with static storage to avoid heap allocation
-      static StaticJsonDocument<512> doc;
+      // Power messages can contain 16 channels, so leave headroom for ArduinoJson metadata.
+      static StaticJsonDocument<1024> doc;
       doc.clear();
       DeserializationError error = deserializeJson(doc, jsonString);
       
       if(error){
         // JSON parsing failed - treat as unknown
         messageTypeBuffer[0] = '\0';
+        lastJsonBuffer[0] = '\0';
+        lastJsonParseSucceeded = false;
         return;
       }
       
@@ -102,19 +109,30 @@ class Serial1CommsManager {
       // Store the JSON document for later parsing
       strncpy(lastJsonBuffer, jsonString, sizeof(lastJsonBuffer) - 1);
       lastJsonBuffer[sizeof(lastJsonBuffer) - 1] = '\0';
+      lastJsonParseSucceeded = true;
     }
     
     // Clear all buffers and reset state
     void ClearBuffers(){
       messageBufferIndex = 0;
       messageBuffer[0] = '\0';
+      lastRawBuffer[0] = '\0';
       messageTypeBuffer[0] = '\0';
       lastJsonBuffer[0] = '\0';
+      lastJsonParseSucceeded = false;
       while(serial1.available() > 0){
         serial1.read();
       }
     }
     
+    const char* GetLastRawMessageCStr(){
+      return lastRawBuffer;
+    }
+
+    bool LastJsonParseSucceeded(){
+      return lastJsonParseSucceeded;
+    }
+
     // Get the message type (header "h" field from JSON)
     const char* GetMessageTypeCStr(){
       return messageTypeBuffer;
@@ -130,8 +148,8 @@ class Serial1CommsManager {
         return channelPowerArray; // Not a power message
       }
       
-      // Parse JSON - use StaticJsonDocument with static storage to avoid heap allocation
-      static StaticJsonDocument<256> doc; // Power messages are small, 256 should be enough
+      // 16-channel power arrays need more room than the previous 256-byte document allowed.
+      static StaticJsonDocument<1024> doc;
       doc.clear();
       DeserializationError error = deserializeJson(doc, lastJsonBuffer);
       
@@ -181,8 +199,10 @@ class Serial1CommsManager {
     // Fixed-size buffers - no heap allocation (allocated once per instance)
     char messageBuffer[2048];         // Buffer for accumulating message characters
     int messageBufferIndex;            // Current write position in buffer
+    char lastRawBuffer[2048];          // Store last complete raw message for debug
     char lastJsonBuffer[2048];         // Store last JSON message for parsing
     char messageTypeBuffer[16];        // Message type from JSON "h" field (e.g., "power", "tc")
+    bool lastJsonParseSucceeded;       // True if the last raw message parsed as JSON
 };
 #endif
 
