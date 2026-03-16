@@ -37,7 +37,7 @@ double channelPowerPercent[NUM_CHANNELS];
 
 #define NUM_ACTIVE_TCS 2
 #define NUM_CASES 1
-#define STARTUP_ROOM_TEMP 20
+#define STARTUP_ROOM_TEMP 20.00 // Deg C
 #define DEFAULT_CASE_INDEX 0
 
 // Dead time is applied as an integer number of 1-second simulation steps.
@@ -92,7 +92,13 @@ void resetChannelPowerHistory() {
 }
 
 double round2(double value) {
-  return (int)(value * 100 + 0.5) / 100.0;
+  double v = value * 100.0;
+  if (v >= 0.0) {
+    v = floor(v + 0.5);
+  } else {
+    v = ceil(v - 0.5);
+  }
+  return v / 100.0;
 }
 
 const SimulationCase& getActiveCase() {
@@ -186,7 +192,9 @@ bool applyCaseByIndex(int newCaseIndex, bool resetActiveTemps) {
 
 void appendTcTriplet(ArduinoJson::JsonArray& tcDataArray, int tcIndex) {
   tcDataArray.add(tcIndex);
-  tcDataArray.add(round2(simulatedTCValues[tcIndex]));
+  double tempC = simulatedTCValues[tcIndex];
+  double tempF = tempC * 1.8 + 32.0;
+  tcDataArray.add(round2(tempF));
   tcDataArray.add(tcFaultCodes[tcIndex]);
 }
 
@@ -347,7 +355,8 @@ void loop() {
       double tDotOut = (temp - activeTc.ambientTemp) * activeTc.heatTransferHa / activeTc.heatCap;
       double tDot = tDotIn - tDotOut;
 
-      simulatedTCValues[activeTc.tcIndex] = (temp + tDot * UPDATE_INTERVAL / 1000.0) * 1.8 + 32.0;
+      // Keep simulation state in °C; convert to °F only when sending JSON.
+      simulatedTCValues[activeTc.tcIndex] = temp + tDot * UPDATE_INTERVAL / 1000.0;
     }
 
     channelPowerHistoryHead = (channelPowerHistoryHead + 1) % POWER_HISTORY_LEN;
