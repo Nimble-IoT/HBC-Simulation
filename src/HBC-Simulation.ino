@@ -26,7 +26,7 @@ Serial1CommsManager serial1CommsManager(Serial1);
 #define TC_SEND_INTERVAL_MS 1000  // Send all active TCs once per second
 
 // Initial simulated TC values
-// Set them all to 70.00 Deg F
+// Set them all to 20.00 Deg C
 #define NUM_TCS 50
 double simulatedTCValues[NUM_TCS];
 
@@ -35,10 +35,14 @@ double simulatedTCValues[NUM_TCS];
 #define NUM_CHANNELS 16
 double channelPowerPercent[NUM_CHANNELS];
 
-#define NUM_ACTIVE_TCS 4
-#define NUM_CASES 2
-#define STARTUP_ROOM_TEMP 70.0
+#define NUM_ACTIVE_TCS 2
+#define NUM_CASES 1
+#define STARTUP_ROOM_TEMP 20
 #define DEFAULT_CASE_INDEX 0
+
+// Dead time is applied as an integer number of 1-second simulation steps.
+#define MAX_DEADTIME_SEC 60
+#define POWER_HISTORY_LEN (MAX_DEADTIME_SEC + 1)
 
 unsigned long lastUpdate = 0;
 unsigned long lastTcSend = 0;
@@ -52,6 +56,7 @@ struct ActiveTcConfig {
   double heatTransferHa;
   double ambientTemp;
   double maxPower;
+  double deadTimeSec;
 };
 
 struct SimulationCase {
@@ -60,29 +65,31 @@ struct SimulationCase {
   ActiveTcConfig activeTcConfigs[NUM_ACTIVE_TCS];
 };
 
-// Hardcoded cases can be extended by editing these four active TC rows per case.
+// Hardcoded cases can be extended by editing these active TC rows per case.
 const SimulationCase simulationCases[NUM_CASES] = {
   {
     1,
     "case1",
     {
-      {0, 0, 1000.0, 50.0, 70.0, 10000.0},
-      {1, 1, 1000.0, 50.0, 70.0, 10000.0},
-      {2, 2, 1000.0, 50.0, 70.0, 10000.0},
-      {3, 3, 1000.0, 50.0, 70.0, 10000.0}
-    }
-  },
-  {
-    2,
-    "case2",
-    {
-      {0, 4, 1200.0, 35.0, 70.0, 8500.0},
-      {1, 5, 900.0, 60.0, 70.0, 9000.0},
-      {2, 6, 1100.0, 45.0, 70.0, 9500.0},
-      {3, 7, 800.0, 70.0, 70.0, 10500.0}
+      // {tcIndex, channelIndex, heatCap, heatTransferHa, ambientTemp(F), maxPower, deadTimeSec}
+      {0, 0, 288.0, 36.0, 20.0, 1000.0, 10.0},
+      {1, 0, 288.0, 36.0, 20.0, 2000.0, 10.0},
     }
   }
 };
+
+// Ring buffer of recent channel power percentages to implement dead time.
+double channelPowerHistory[NUM_CHANNELS][POWER_HISTORY_LEN] = {};
+int channelPowerHistoryHead = 0;
+
+void resetChannelPowerHistory() {
+  for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+    for (int i = 0; i < POWER_HISTORY_LEN; i++) {
+      channelPowerHistory[ch][i] = 0.0;
+    }
+  }
+  channelPowerHistoryHead = 0;
+}
 
 double round2(double value) {
   return (int)(value * 100 + 0.5) / 100.0;
@@ -97,7 +104,7 @@ bool isActiveTcIndexValid(int tcIndex) {
 }
 
 bool validateCase(const SimulationCase& simulationCase) {
-  bool seenIndices[NUM_ACTIVE_TCS] = {false, false, false, false};
+  bool seenIndices[NUM_ACTIVE_TCS] = {};
 
   for (int i = 0; i < NUM_ACTIVE_TCS; i++) {
     const ActiveTcConfig& activeTc = simulationCase.activeTcConfigs[i];
@@ -111,6 +118,10 @@ bool validateCase(const SimulationCase& simulationCase) {
     }
 
     if (activeTc.heatCap <= 0.0 || activeTc.maxPower < 0.0) {
+      return false;
+    }
+
+    if (activeTc.deadTimeSec < 0.0 || activeTc.deadTimeSec > (double)MAX_DEADTIME_SEC) {
       return false;
     }
 
@@ -164,6 +175,7 @@ bool applyCaseByIndex(int newCaseIndex, bool resetActiveTemps) {
   }
 
   activeCaseIndex = newCaseIndex;
+  resetChannelPowerHistory();
 
   if (resetActiveTemps) {
     resetActiveTcValuesToAmbient();
@@ -273,6 +285,8 @@ void setup() {
   for (int i = 0; i < NUM_CHANNELS; i++) {
     channelPowerPercent[i] = 0.0;
   }
+
+  resetChannelPowerHistory();
   
   // Initialize all TC fault codes to 0 (no fault)
   for (int i = 0; i < NUM_TCS; i++) {
@@ -309,18 +323,34 @@ void loop() {
   if ((now - lastUpdate) >= UPDATE_INTERVAL) {
     lastUpdate = now;
 
+    // Capture the latest power percent snapshot into the ring buffer.
+    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+      channelPowerHistory[ch][channelPowerHistoryHead] = channelPowerPercent[ch];
+    }
+
     const SimulationCase& simulationCase = getActiveCase();
     for (int i = 0; i < NUM_ACTIVE_TCS; i++) {
       const ActiveTcConfig& activeTc = simulationCase.activeTcConfigs[i];
-      double powerPercent = channelPowerPercent[activeTc.channelIndex];
+
+      int deadSteps = (int)(activeTc.deadTimeSec + 0.5); // 1 step = 1 second (UPDATE_INTERVAL=1000ms)
+      if (deadSteps < 0) deadSteps = 0;
+      if (deadSteps > (POWER_HISTORY_LEN - 1)) deadSteps = (POWER_HISTORY_LEN - 1);
+
+      int delayedIdx = channelPowerHistoryHead - deadSteps;
+      while (delayedIdx < 0) delayedIdx += POWER_HISTORY_LEN;
+      delayedIdx %= POWER_HISTORY_LEN;
+
+      double powerPercent = channelPowerHistory[activeTc.channelIndex][delayedIdx];
       double powerIn = (powerPercent / 100.0) * activeTc.maxPower;
       double temp = simulatedTCValues[activeTc.tcIndex];
       double tDotIn = powerIn / activeTc.heatCap;
       double tDotOut = (temp - activeTc.ambientTemp) * activeTc.heatTransferHa / activeTc.heatCap;
       double tDot = tDotIn - tDotOut;
 
-      simulatedTCValues[activeTc.tcIndex] = temp + tDot * UPDATE_INTERVAL / 1000.0;
+      simulatedTCValues[activeTc.tcIndex] = (temp + tDot * UPDATE_INTERVAL / 1000.0) * 1.8 + 32.0;
     }
+
+    channelPowerHistoryHead = (channelPowerHistoryHead + 1) % POWER_HISTORY_LEN;
   }
   
   // Async communication - Process incoming messages (power)
